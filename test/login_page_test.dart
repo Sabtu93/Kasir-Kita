@@ -11,7 +11,7 @@ void main() {
         home: LoginPage(
           accountIds: const [],
           onLogin: (_, _) async => null,
-          onRegister: (_, _) async => null,
+          onRegister: (_, _, _, _) async => null,
         ),
       ),
     );

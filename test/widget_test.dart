@@ -14,9 +14,17 @@ void main() {
     await tester.pumpAndSettle();
 
     await _registerAccount(tester);
-    expect(find.text('Kasir Kita'), findsOneWidget);
+    expect(find.text('Toko Saya'), findsOneWidget);
     expect(find.text('Daftar Produk'), findsOneWidget);
-    expect(find.byTooltip('Unduh laporan harian'), findsOneWidget);
+    expect(find.byTooltip('Unduh laporan penjualan'), findsOneWidget);
+    await tester.tap(find.byTooltip('Unduh laporan penjualan'));
+    await tester.pumpAndSettle();
+    expect(find.text('Laporan bulanan'), findsOneWidget);
+    await tester.tap(find.text('Laporan bulanan'));
+    await tester.pumpAndSettle();
+    expect(find.text('Pilih tanggal dalam bulan laporan'), findsOneWidget);
+    await tester.tap(find.text('Batal'));
+    await tester.pumpAndSettle();
 
     await tester.ensureVisible(find.text('Beras Setra Ramos 5kg'));
     await tester.pumpAndSettle();
@@ -104,6 +112,7 @@ void main() {
 Future<void> _registerAccount(WidgetTester tester) async {
   await tester.tap(find.text('Belum punya akun? Daftar akun'));
   await tester.pumpAndSettle();
+  await tester.enterText(find.byKey(const ValueKey('shop-name')), 'Toko Saya');
   await tester.enterText(find.byKey(const ValueKey('account-id')), 'kasir01');
   await tester.enterText(
     find.byKey(const ValueKey('account-password')),
@@ -113,11 +122,14 @@ Future<void> _registerAccount(WidgetTester tester) async {
     find.byKey(const ValueKey('account-confirm-password')),
     'rahasia123',
   );
+  await tester.ensureVisible(find.text('Buat akun'));
+  await tester.pumpAndSettle();
   await tester.tap(find.text('Buat akun'));
   await tester.pump();
   await tester.pump(const Duration(seconds: 2));
   await tester.pumpAndSettle();
   await _startStore(tester);
+  expect(find.text('Toko Saya'), findsOneWidget);
 }
 
 Future<void> _startStore(WidgetTester tester) async {

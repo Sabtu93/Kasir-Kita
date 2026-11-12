@@ -7,6 +7,7 @@ import 'package:file_saver/file_saver.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
@@ -17,6 +18,32 @@ const _green = Color(0xFF176B4D);
 const _dark = Color(0xFF18352B);
 const _muted = Color(0xFF75827C);
 const _canvas = Color(0xFFF6F8F5);
+const _maxImageBytes = 512 * 1024;
+
+Future<Uint8List?> _pickLocalImage() async {
+  final file = await ImagePicker().pickImage(
+    source: ImageSource.gallery,
+    maxWidth: 640,
+    maxHeight: 640,
+    imageQuality: 75,
+  );
+  if (file == null) return null;
+  final bytes = await file.readAsBytes();
+  if (bytes.isEmpty) throw StateError('File gambar kosong.');
+  if (bytes.length > _maxImageBytes) {
+    throw StateError('Pilih gambar yang lebih kecil dari 512 KB.');
+  }
+  return bytes;
+}
+
+Uint8List? _decodeImage(String? encoded) {
+  if (encoded == null || encoded.isEmpty) return null;
+  try {
+    return base64Decode(encoded);
+  } on FormatException {
+    return null;
+  }
+}
 
 class MinimarketApp extends StatefulWidget {
   const MinimarketApp({super.key});
@@ -116,7 +143,12 @@ class _MinimarketAppState extends State<MinimarketApp> {
     return null;
   }
 
-  Future<String?> _register(String id, String password) async {
+  Future<String?> _register(
+    String id,
+    String password,
+    String shopName,
+    String? shopLogo,
+  ) async {
     final normalizedId = id.trim();
     if (_accounts.any(
       (account) => account.id.toLowerCase() == normalizedId.toLowerCase(),
@@ -128,6 +160,8 @@ class _MinimarketAppState extends State<MinimarketApp> {
       id: normalizedId,
       salt: _toHex(salt),
       passwordHash: await _hashPassword(password, _toHex(salt)),
+      shopName: shopName.trim(),
+      shopLogo: shopLogo,
     );
     final updatedAccounts = [..._accounts, account];
     final saved = await _preferences!.setString(
@@ -189,6 +223,12 @@ class _MinimarketAppState extends State<MinimarketApp> {
             )
           : CashierPage(
               userId: _activeUser!,
+              shopName: _accounts
+                  .firstWhere((account) => account.id == _activeUser)
+                  .shopName,
+              shopLogo: _accounts
+                  .firstWhere((account) => account.id == _activeUser)
+                  .shopLogo,
               products: _catalog,
               sales: _sales,
               onAddProduct: _addProduct,
@@ -204,6 +244,7 @@ class Product {
     required this.name,
     required this.category,
     this.hpp,
+    this.imageData,
     required this.price,
     required this.icon,
     required this.color,
@@ -213,6 +254,7 @@ class Product {
   final String name;
   final String category;
   final int? hpp;
+  final String? imageData;
   final int price;
   final IconData icon;
   final Color color;
@@ -222,6 +264,7 @@ class Product {
     'name': name,
     'category': category,
     'hpp': hpp,
+    'imageData': imageData,
     'price': price,
     'stock': stock,
   };
@@ -232,6 +275,7 @@ class Product {
       name: map['name'] as String,
       category: category,
       hpp: map['hpp'] as int?,
+      imageData: map['imageData'] as String?,
       price: map['price'] as int,
       icon: _categoryIcon(category),
       color: _categoryColor(category),
@@ -315,13 +359,46 @@ class SaleRecord {
 }
 
 Uint8List generateDailySalesXlsx(List<SaleRecord> sales, DateTime date) {
-  final dailySales =
+  final start = DateTime(date.year, date.month, date.day);
+  return _generateSalesXlsx(
+    sales,
+    start: start,
+    end: start.add(const Duration(days: 1)),
+    title: 'LAPORAN PENJUALAN HARIAN',
+    periodLabel: _formatReportDate(start),
+  );
+}
+
+Uint8List generateMonthlySalesXlsx(
+  List<SaleRecord> sales,
+  int year,
+  int month,
+) {
+  if (month < 1 || month > 12) {
+    throw ArgumentError.value(month, 'month', 'must be from 1 to 12');
+  }
+  final start = DateTime(year, month);
+  return _generateSalesXlsx(
+    sales,
+    start: start,
+    end: DateTime(year, month + 1),
+    title: 'LAPORAN PENJUALAN BULANAN',
+    periodLabel: _formatReportMonth(start),
+  );
+}
+
+Uint8List _generateSalesXlsx(
+  List<SaleRecord> sales, {
+  required DateTime start,
+  required DateTime end,
+  required String title,
+  required String periodLabel,
+}) {
+  final periodSales =
       sales
           .where(
             (sale) =>
-                sale.soldAt.year == date.year &&
-                sale.soldAt.month == date.month &&
-                sale.soldAt.day == date.day,
+                !sale.soldAt.isBefore(start) && sale.soldAt.isBefore(end),
           )
           .toList()
         ..sort((a, b) => a.soldAt.compareTo(b.soldAt));
@@ -396,31 +473,31 @@ Uint8List generateDailySalesXlsx(List<SaleRecord> sales, DateTime date) {
     sheet.setRowHeight(0, 30);
   }
 
-  final dailyRevenue = dailySales.fold<int>(0, (sum, sale) => sum + sale.total);
-  final knownCosts = dailySales.fold<int>(
+  final periodRevenue = periodSales.fold<int>(
+    0,
+    (sum, sale) => sum + sale.total,
+  );
+  final knownCosts = periodSales.fold<int>(
     0,
     (sum, sale) => sum + sale.knownCostTotal,
   );
-  final knownProfit = dailySales.fold<int>(
+  final knownProfit = periodSales.fold<int>(
     0,
     (sum, sale) => sum + sale.knownGrossProfit,
   );
-  final itemsWithoutCost = dailySales.fold<int>(
+  final itemsWithoutCost = periodSales.fold<int>(
     0,
     (sum, sale) => sum + sale.itemsWithoutCost,
   );
-  final dateText =
-      '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
-
-  setTitle(summary, 1, 'LAPORAN PENJUALAN HARIAN');
-  setCell(summary, 1, 0, TextCellValue('Tanggal'));
-  setCell(summary, 1, 1, TextCellValue(dateText));
+  setTitle(summary, 1, title);
+  setCell(summary, 1, 0, TextCellValue('Periode'));
+  setCell(summary, 1, 1, TextCellValue(periodLabel));
   setCell(summary, 3, 0, TextCellValue('RINGKASAN'), style: headerStyle);
   setCell(summary, 3, 1, TextCellValue('NILAI'), style: headerStyle);
 
   final metrics = <(String, int)>[
-    ('Jumlah transaksi', dailySales.length),
-    ('Omzet penjualan', dailyRevenue),
+    ('Jumlah transaksi', periodSales.length),
+    ('Omzet penjualan', periodRevenue),
     ('Total HPP terdata', knownCosts),
     ('Laba kotor terdata', knownProfit),
     ('Item tanpa data HPP', itemsWithoutCost),
@@ -476,9 +553,9 @@ Uint8List generateDailySalesXlsx(List<SaleRecord> sales, DateTime date) {
     'Tunai Diterima',
     'Kembalian',
   ];
-  setTitle(detail, headers.length - 1, 'RINCIAN PENJUALAN');
-  setCell(detail, 1, 0, TextCellValue('Tanggal'));
-  setCell(detail, 1, 1, TextCellValue(dateText));
+  setTitle(detail, headers.length - 1, title);
+  setCell(detail, 1, 0, TextCellValue('Periode'));
+  setCell(detail, 1, 1, TextCellValue(periodLabel));
   for (var column = 0; column < headers.length; column++) {
     setCell(
       detail,
@@ -491,13 +568,14 @@ Uint8List generateDailySalesXlsx(List<SaleRecord> sales, DateTime date) {
   detail.setRowHeight(3, 32);
 
   var row = 4;
-  for (final sale in dailySales) {
+  for (final sale in periodSales) {
+    final saleDateText = _formatReportDate(sale.soldAt);
     final timeText =
         '${sale.soldAt.hour.toString().padLeft(2, '0')}:${sale.soldAt.minute.toString().padLeft(2, '0')}:${sale.soldAt.second.toString().padLeft(2, '0')}';
     for (var index = 0; index < sale.items.length; index++) {
       final item = sale.items[index];
       final data = <CellValue?>[
-        TextCellValue(dateText),
+        TextCellValue(saleDateText),
         TextCellValue(timeText),
         TextCellValue(sale.receiptNumber),
         TextCellValue(item.productName),
@@ -531,8 +609,8 @@ Uint8List generateDailySalesXlsx(List<SaleRecord> sales, DateTime date) {
     }
   }
 
-  if (dailySales.isEmpty) {
-    setCell(detail, row, 0, TextCellValue('Belum ada transaksi hari ini.'));
+  if (periodSales.isEmpty) {
+    setCell(detail, row, 0, TextCellValue('Belum ada transaksi pada periode ini.'));
   }
 
   const columnWidths = <double>[14, 12, 16, 30, 8, 17, 17, 17, 17, 17, 18, 16];
@@ -546,6 +624,27 @@ Uint8List generateDailySalesXlsx(List<SaleRecord> sales, DateTime date) {
   }
   return Uint8List.fromList(encoded);
 }
+
+const _reportMonthNames = [
+  'Januari',
+  'Februari',
+  'Maret',
+  'April',
+  'Mei',
+  'Juni',
+  'Juli',
+  'Agustus',
+  'September',
+  'Oktober',
+  'November',
+  'Desember',
+];
+
+String _formatReportDate(DateTime date) =>
+    '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
+
+String _formatReportMonth(DateTime date) =>
+    '${_reportMonthNames[date.month - 1]} ${date.year}';
 
 const _productCategories = ['Sembako', 'Makanan', 'Minuman', 'Kebutuhan'];
 
@@ -565,27 +664,57 @@ Color _categoryColor(String category) => switch (category) {
   _ => const Color(0xFFE8ECE8),
 };
 
+Widget _productImage(Product product, {required double iconSize}) {
+  final bytes = _decodeImage(product.imageData);
+  if (bytes == null) {
+    return Icon(
+      product.icon,
+      size: iconSize,
+      color: _dark.withValues(alpha: 0.72),
+    );
+  }
+  return Image.memory(
+    bytes,
+    fit: BoxFit.cover,
+    width: double.infinity,
+    height: double.infinity,
+    errorBuilder: (_, _, _) => Icon(
+      product.icon,
+      size: iconSize,
+      color: _dark.withValues(alpha: 0.72),
+    ),
+  );
+}
+
 class _LocalAccount {
   const _LocalAccount({
     required this.id,
     required this.salt,
     required this.passwordHash,
+    required this.shopName,
+    this.shopLogo,
   });
 
   final String id;
   final String salt;
   final String passwordHash;
+  final String shopName;
+  final String? shopLogo;
 
-  Map<String, String> toMap() => {
+  Map<String, Object?> toMap() => {
     'id': id,
     'salt': salt,
     'passwordHash': passwordHash,
+    'shopName': shopName,
+    'shopLogo': shopLogo,
   };
 
   factory _LocalAccount.fromMap(Map<String, dynamic> map) => _LocalAccount(
     id: map['id'] as String,
     salt: map['salt'] as String,
     passwordHash: map['passwordHash'] as String,
+    shopName: map['shopName'] as String? ?? map['id'] as String,
+    shopLogo: map['shopLogo'] as String?,
   );
 }
 
@@ -760,7 +889,13 @@ class LoginPage extends StatefulWidget {
 
   final List<String> accountIds;
   final Future<String?> Function(String id, String password) onLogin;
-  final Future<String?> Function(String id, String password) onRegister;
+  final Future<String?> Function(
+    String id,
+    String password,
+    String shopName,
+    String? shopLogo,
+  )
+  onRegister;
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -769,17 +904,20 @@ class LoginPage extends StatefulWidget {
 class _LoginPageState extends State<LoginPage> {
   final _formKey = GlobalKey<FormState>();
   final _idController = TextEditingController();
+  final _shopNameController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmationController = TextEditingController();
   bool _registering = false;
   bool _busy = false;
   bool _obscurePassword = true;
   bool _obscureConfirmation = true;
+  Uint8List? _shopLogoBytes;
   String? _error;
 
   @override
   void dispose() {
     _idController.dispose();
+    _shopNameController.dispose();
     _passwordController.dispose();
     _confirmationController.dispose();
     super.dispose();
@@ -807,6 +945,10 @@ class _LoginPageState extends State<LoginPage> {
           ? await widget.onRegister(
               _idController.text.trim(),
               _passwordController.text,
+              _shopNameController.text.trim(),
+              _shopLogoBytes == null
+                  ? null
+                  : base64Encode(_shopLogoBytes!),
             )
           : await widget.onLogin(
               _idController.text.trim(),
@@ -831,6 +973,20 @@ class _LoginPageState extends State<LoginPage> {
       _passwordController.clear();
       _confirmationController.clear();
     });
+  }
+
+  Future<void> _pickShopLogo() async {
+    try {
+      final image = await _pickLocalImage();
+      if (mounted && image != null) {
+        setState(() {
+          _shopLogoBytes = image;
+          _error = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _error = 'Logo toko tidak dapat dipilih: $error');
+    }
   }
 
   @override
@@ -966,6 +1122,96 @@ class _LoginPageState extends State<LoginPage> {
                                     fontSize: 13,
                                   ),
                                 ),
+                                if (_registering) ...[
+                                  const SizedBox(height: 22),
+                                  TextFormField(
+                                    key: const ValueKey('shop-name'),
+                                    controller: _shopNameController,
+                                    textCapitalization:
+                                        TextCapitalization.words,
+                                    textInputAction: TextInputAction.next,
+                                    validator: (value) =>
+                                        value == null || value.trim().isEmpty
+                                        ? 'Nama toko wajib diisi.'
+                                        : null,
+                                    decoration: _authDecoration(
+                                      'Nama toko',
+                                    ).copyWith(
+                                      prefixIcon: const Icon(
+                                        Icons.storefront_outlined,
+                                        size: 20,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  Row(
+                                    children: [
+                                      Container(
+                                        width: 58,
+                                        height: 58,
+                                        decoration: BoxDecoration(
+                                          color: _canvas,
+                                          borderRadius: BorderRadius.circular(
+                                            14,
+                                          ),
+                                          border: Border.all(
+                                            color: const Color(0xFFE8ECE8),
+                                          ),
+                                        ),
+                                        clipBehavior: Clip.antiAlias,
+                                        child: _shopLogoBytes == null
+                                            ? const Icon(
+                                                Icons.add_photo_alternate_outlined,
+                                                color: _muted,
+                                              )
+                                            : Image.memory(
+                                                _shopLogoBytes!,
+                                                fit: BoxFit.cover,
+                                              ),
+                                      ),
+                                      const SizedBox(width: 12),
+                                      Expanded(
+                                        child: OutlinedButton.icon(
+                                          onPressed: _busy
+                                              ? null
+                                              : _pickShopLogo,
+                                          icon: const Icon(
+                                            Icons.image_outlined,
+                                            size: 18,
+                                          ),
+                                          label: Text(
+                                            _shopLogoBytes == null
+                                                ? 'Pilih logo toko'
+                                                : 'Ganti logo toko',
+                                          ),
+                                        ),
+                                      ),
+                                      if (_shopLogoBytes != null)
+                                        IconButton(
+                                          tooltip: 'Hapus logo toko',
+                                          onPressed: _busy
+                                              ? null
+                                              : () => setState(
+                                                  () => _shopLogoBytes = null,
+                                                ),
+                                          icon: const Icon(
+                                            Icons.delete_outline_rounded,
+                                            color: _muted,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                  const Padding(
+                                    padding: EdgeInsets.only(top: 5),
+                                    child: Text(
+                                      'Logo opsional. Maksimal ukuran gambar 512 KB.',
+                                      style: TextStyle(
+                                        color: _muted,
+                                        fontSize: 10,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                                 const SizedBox(height: 24),
                                 TextFormField(
                                   key: const ValueKey('account-id'),
@@ -1250,6 +1496,8 @@ InputDecoration _authDecoration(String label) => InputDecoration(
 class CashierPage extends StatefulWidget {
   const CashierPage({
     required this.userId,
+    required this.shopName,
+    required this.shopLogo,
     required this.products,
     required this.sales,
     required this.onAddProduct,
@@ -1259,6 +1507,8 @@ class CashierPage extends StatefulWidget {
   });
 
   final String userId;
+  final String shopName;
+  final String? shopLogo;
   final List<Product> products;
   final List<SaleRecord> sales;
   final Future<void> Function(Product product) onAddProduct;
@@ -1471,18 +1721,69 @@ class _CashierPageState extends State<CashierPage> {
             .toList()
           ..sort((a, b) => a.soldAt.compareTo(b.soldAt));
     final date = _dateStamp(now);
+    await _saveSalesReport(
+      generateBytes: () => generateDailySalesXlsx(dailySales, now),
+      fileName: 'laporan_penjualan_$date',
+      transactionCount: dailySales.length,
+      periodLabel: 'hari ini',
+    );
+  }
+
+  Future<void> _downloadMonthlyReport() async {
+    final now = DateTime.now();
+    final selectedDate = await showDatePicker(
+      context: context,
+      initialDate: DateTime(now.year, now.month, now.day),
+      firstDate: DateTime(2000),
+      lastDate: DateTime(now.year, now.month, now.day),
+      helpText: 'Pilih tanggal dalam bulan laporan',
+      cancelText: 'Batal',
+      confirmText: 'Pilih bulan',
+    );
+    if (!mounted || selectedDate == null) return;
+
+    final monthStart = DateTime(selectedDate.year, selectedDate.month);
+    final monthEnd = DateTime(selectedDate.year, selectedDate.month + 1);
+    final monthlySales =
+        widget.sales
+            .where(
+              (sale) =>
+                  !sale.soldAt.isBefore(monthStart) &&
+                  sale.soldAt.isBefore(monthEnd),
+            )
+            .toList()
+          ..sort((a, b) => a.soldAt.compareTo(b.soldAt));
+    await _saveSalesReport(
+      generateBytes: () => generateMonthlySalesXlsx(
+        monthlySales,
+        selectedDate.year,
+        selectedDate.month,
+      ),
+      fileName:
+          'laporan_penjualan_bulanan_${selectedDate.year}${selectedDate.month.toString().padLeft(2, '0')}',
+      transactionCount: monthlySales.length,
+      periodLabel: _formatReportMonth(selectedDate),
+    );
+  }
+
+  Future<void> _saveSalesReport({
+    required Uint8List Function() generateBytes,
+    required String fileName,
+    required int transactionCount,
+    required String periodLabel,
+  }) async {
     try {
-      final bytes = generateDailySalesXlsx(dailySales, now);
+      final bytes = generateBytes();
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
         await FileSaver.instance.saveAs(
-          name: 'laporan_penjualan_$date',
+          name: fileName,
           bytes: bytes,
           fileExtension: 'xlsx',
           mimeType: MimeType.microsoftExcel,
         );
       } else {
         await FileSaver.instance.saveToDownloads(
-          name: 'laporan_penjualan_$date',
+          name: fileName,
           bytes: bytes,
           fileExtension: 'xlsx',
           mimeType: MimeType.microsoftExcel,
@@ -1495,7 +1796,7 @@ class _CashierPageState extends State<CashierPage> {
           SnackBar(
             behavior: SnackBarBehavior.floating,
             content: Text(
-              'Laporan Excel ${dailySales.length} transaksi tersimpan di folder Unduhan.',
+              'Laporan $periodLabel ($transactionCount transaksi) tersimpan di folder Unduhan.',
             ),
           ),
         );
@@ -1569,6 +1870,7 @@ class _CashierPageState extends State<CashierPage> {
 
   Widget _buildHeader(bool wide) {
     final now = DateTime.now();
+    final logoBytes = _decodeImage(widget.shopLogo);
     final date =
         '${now.day.toString().padLeft(2, '0')} ${_monthName(now.month)} ${now.year}';
     return Container(
@@ -1586,18 +1888,25 @@ class _CashierPageState extends State<CashierPage> {
               color: _green,
               borderRadius: BorderRadius.circular(14),
             ),
-            child: const Icon(
-              Icons.storefront_rounded,
-              color: Colors.white,
-              size: 25,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: logoBytes == null
+                  ? const Icon(
+                      Icons.storefront_rounded,
+                      color: Colors.white,
+                      size: 25,
+                    )
+                  : Image.memory(logoBytes, fit: BoxFit.cover),
             ),
           ),
           const SizedBox(width: 12),
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'Kasir Kita',
+              Text(
+                widget.shopName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                   color: _dark,
                   fontSize: 18,
@@ -1652,19 +1961,39 @@ class _CashierPageState extends State<CashierPage> {
                 fontWeight: FontWeight.w700,
               ),
             ),
-          if (wide)
-            TextButton.icon(
-              onPressed: _downloadDailyReport,
-              icon: const Icon(Icons.download_rounded, size: 18),
-              label: const Text('Laporan harian'),
-              style: TextButton.styleFrom(foregroundColor: _green),
-            )
-          else
-            IconButton(
-              tooltip: 'Unduh laporan harian',
-              onPressed: _downloadDailyReport,
-              icon: const Icon(Icons.download_rounded, color: _green, size: 20),
+          PopupMenuButton<String>(
+            tooltip: 'Unduh laporan penjualan',
+            onSelected: (report) {
+              if (report == 'daily') {
+                _downloadDailyReport();
+              } else {
+                _downloadMonthlyReport();
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(value: 'daily', child: Text('Laporan harian')),
+              PopupMenuItem(value: 'monthly', child: Text('Laporan bulanan')),
+            ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.download_rounded, color: _green, size: 20),
+                  if (wide) ...[
+                    const SizedBox(width: 6),
+                    const Text(
+                      'Laporan',
+                      style: TextStyle(
+                        color: _green,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ),
+          ),
           if (wide)
             TextButton.icon(
               onPressed: _closeStore,
@@ -2285,16 +2614,12 @@ class _ProductCard extends StatelessWidget {
               Expanded(
                 child: Stack(
                   children: [
-                    Container(
-                      width: double.infinity,
-                      decoration: BoxDecoration(
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        width: double.infinity,
                         color: product.color,
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(
-                        product.icon,
-                        size: 43,
-                        color: _dark.withValues(alpha: 0.72),
+                        child: _productImage(product, iconSize: 43),
                       ),
                     ),
                     if (countInCart > 0)
@@ -2416,10 +2741,10 @@ class _CartItem extends StatelessWidget {
               color: product.color,
               borderRadius: BorderRadius.circular(11),
             ),
-            child: Icon(
-              product.icon,
-              color: _dark.withValues(alpha: 0.72),
-              size: 23,
+            clipBehavior: Clip.antiAlias,
+            child: _productImage(
+              product,
+              iconSize: 23,
             ),
           ),
           const SizedBox(width: 10),
@@ -2514,6 +2839,8 @@ class _AddProductDialogState extends State<AddProductDialog> {
   final _categoryController = TextEditingController(
     text: _productCategories.first,
   );
+  Uint8List? _imageBytes;
+  String? _imageError;
 
   @override
   void dispose() {
@@ -2544,12 +2871,27 @@ class _AddProductDialogState extends State<AddProductDialog> {
         name: _nameController.text.trim(),
         category: category,
         hpp: int.parse(_hppController.text),
+        imageData: _imageBytes == null ? null : base64Encode(_imageBytes!),
         price: int.parse(_priceController.text),
         icon: _categoryIcon(category),
         color: _categoryColor(category),
         stock: int.parse(_stockController.text),
       ),
     );
+  }
+
+  Future<void> _pickProductImage() async {
+    try {
+      final image = await _pickLocalImage();
+      if (mounted && image != null) {
+        setState(() {
+          _imageBytes = image;
+          _imageError = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) setState(() => _imageError = 'Foto tidak dapat dipilih: $error');
+    }
   }
 
   @override
@@ -2604,6 +2946,70 @@ class _AddProductDialogState extends State<AddProductDialog> {
                 ),
               ),
             ),
+            const SizedBox(height: 12),
+            InkWell(
+              key: const ValueKey('product-image-picker'),
+              onTap: _pickProductImage,
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                height: 132,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: _canvas,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFE8ECE8)),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: _imageBytes == null
+                    ? const Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(
+                            Icons.add_photo_alternate_outlined,
+                            color: _green,
+                            size: 30,
+                          ),
+                          SizedBox(height: 6),
+                          Text(
+                            'Tambah foto produk (opsional)',
+                            style: TextStyle(
+                              color: _muted,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      )
+                    : Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.memory(_imageBytes!, fit: BoxFit.cover),
+                          Positioned(
+                            top: 6,
+                            right: 6,
+                            child: IconButton.filled(
+                              tooltip: 'Hapus foto produk',
+                              onPressed: () => setState(
+                                () => _imageBytes = null,
+                              ),
+                              icon: const Icon(Icons.delete_outline_rounded),
+                            ),
+                          ),
+                        ],
+                      ),
+              ),
+            ),
+            if (_imageError != null) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _imageError!,
+                  style: TextStyle(color: Colors.red.shade700, fontSize: 11),
+                ),
+              ),
+            ],
+            const SizedBox(height: 12),
             const SizedBox(height: 12),
             TextFormField(
               key: const ValueKey('product-hpp'),
