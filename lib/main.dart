@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:excel/excel.dart' hide Border;
 import 'package:file_saver/file_saver.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -244,24 +245,30 @@ class SaleLine {
     required this.productName,
     required this.quantity,
     required this.unitPrice,
+    this.unitCost,
   });
 
   final String productName;
   final int quantity;
   final int unitPrice;
+  final int? unitCost;
 
   int get total => quantity * unitPrice;
+  int? get costTotal => unitCost == null ? null : quantity * unitCost!;
+  int? get grossProfit => costTotal == null ? null : total - costTotal!;
 
   Map<String, Object?> toMap() => {
     'productName': productName,
     'quantity': quantity,
     'unitPrice': unitPrice,
+    'unitCost': unitCost,
   };
 
   factory SaleLine.fromMap(Map<String, dynamic> map) => SaleLine(
     productName: map['productName'] as String,
     quantity: map['quantity'] as int,
     unitPrice: map['unitPrice'] as int,
+    unitCost: map['unitCost'] as int?,
   );
 }
 
@@ -281,6 +288,12 @@ class SaleRecord {
   final int cashReceived;
 
   int get change => cashReceived - total;
+  int get knownCostTotal =>
+      items.fold(0, (sum, item) => sum + (item.costTotal ?? 0));
+  int get knownGrossProfit =>
+      items.fold(0, (sum, item) => sum + (item.grossProfit ?? 0));
+  int get itemsWithoutCost =>
+      items.where((item) => item.unitCost == null).length;
 
   Map<String, Object?> toMap() => {
     'receiptNumber': receiptNumber,
@@ -301,7 +314,7 @@ class SaleRecord {
   );
 }
 
-String generateDailySalesCsv(List<SaleRecord> sales, DateTime date) {
+Uint8List generateDailySalesXlsx(List<SaleRecord> sales, DateTime date) {
   final dailySales =
       sales
           .where(
@@ -312,61 +325,227 @@ String generateDailySalesCsv(List<SaleRecord> sales, DateTime date) {
           )
           .toList()
         ..sort((a, b) => a.soldAt.compareTo(b.soldAt));
-  final rows = <List<String>>[
-    [
-      'Tanggal',
-      'Waktu',
-      'No Transaksi',
-      'Produk',
-      'Jumlah',
-      'Harga Satuan',
-      'Total Item',
-      'Total Transaksi',
-      'Tunai Diterima',
-      'Kembalian',
-    ],
-  ];
+  final workbook = Excel.createExcel();
+  workbook.rename('Sheet1', 'Ringkasan');
+  final summary = workbook['Ringkasan'];
+  final detail = workbook['Rincian Transaksi'];
+  final darkGreen = ExcelColor.fromHexString('FF176B4D');
+  final paleGreen = ExcelColor.fromHexString('FFEAF4EE');
+  final white = ExcelColor.white;
+  final darkText = ExcelColor.fromHexString('FF18352B');
+  final mutedText = ExcelColor.fromHexString('FF75827C');
+  final titleStyle = CellStyle(
+    backgroundColorHex: darkGreen,
+    fontColorHex: white,
+    fontSize: 16,
+    bold: true,
+    verticalAlign: VerticalAlign.Center,
+  );
+  final headerStyle = CellStyle(
+    backgroundColorHex: darkGreen,
+    fontColorHex: white,
+    bold: true,
+    horizontalAlign: HorizontalAlign.Center,
+    verticalAlign: VerticalAlign.Center,
+    textWrapping: TextWrapping.WrapText,
+  );
+  final metricLabelStyle = CellStyle(
+    backgroundColorHex: paleGreen,
+    fontColorHex: darkText,
+    bold: true,
+  );
+  final metricValueStyle = CellStyle(
+    fontColorHex: darkText,
+    horizontalAlign: HorizontalAlign.Right,
+    numberFormat: CustomNumericNumFormat(formatCode: '"Rp" #,##0'),
+  );
+  final countValueStyle = CellStyle(
+    fontColorHex: darkText,
+    horizontalAlign: HorizontalAlign.Right,
+  );
+  final totalStyle = CellStyle(
+    backgroundColorHex: paleGreen,
+    fontColorHex: darkGreen,
+    bold: true,
+    numberFormat: CustomNumericNumFormat(formatCode: '"Rp" #,##0'),
+  );
 
-  for (final sale in dailySales) {
-    final dateText =
-        '${sale.soldAt.day.toString().padLeft(2, '0')}/${sale.soldAt.month.toString().padLeft(2, '0')}/${sale.soldAt.year}';
-    final timeText =
-        '${sale.soldAt.hour.toString().padLeft(2, '0')}:${sale.soldAt.minute.toString().padLeft(2, '0')}:${sale.soldAt.second.toString().padLeft(2, '0')}';
-    final items = sale.items.isEmpty ? <SaleLine?>[null] : sale.items;
-    for (var index = 0; index < items.length; index++) {
-      final item = items[index];
-      rows.add([
-        dateText,
-        timeText,
-        sale.receiptNumber,
-        item?.productName ?? '',
-        item?.quantity.toString() ?? '',
-        item?.unitPrice.toString() ?? '',
-        item?.total.toString() ?? '',
-        index == 0 ? sale.total.toString() : '',
-        index == 0 ? sale.cashReceived.toString() : '',
-        index == 0 ? sale.change.toString() : '',
-      ]);
+  void setCell(
+    Sheet sheet,
+    int row,
+    int column,
+    CellValue? value, {
+    CellStyle? style,
+  }) {
+    final cell = sheet.cell(
+      CellIndex.indexByColumnRow(columnIndex: column, rowIndex: row),
+    );
+    cell.value = value;
+    if (style != null) cell.cellStyle = style;
+  }
+
+  void setTitle(Sheet sheet, int lastColumn, String title) {
+    for (var column = 0; column <= lastColumn; column++) {
+      setCell(sheet, 0, column, TextCellValue(''), style: titleStyle);
     }
+    setCell(sheet, 0, 0, TextCellValue(title), style: titleStyle);
+    sheet.merge(
+      CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 0),
+      CellIndex.indexByColumnRow(columnIndex: lastColumn, rowIndex: 0),
+    );
+    sheet.setRowHeight(0, 30);
   }
 
   final dailyRevenue = dailySales.fold<int>(0, (sum, sale) => sum + sale.total);
-  rows.add([
-    '',
-    '',
-    '',
-    'TOTAL HARIAN (${dailySales.length} transaksi)',
-    '',
-    '',
-    '',
-    dailyRevenue.toString(),
-    '',
-    '',
-  ]);
-  return rows.map((row) => row.map(_csvCell).join(',')).join('\r\n');
-}
+  final knownCosts = dailySales.fold<int>(
+    0,
+    (sum, sale) => sum + sale.knownCostTotal,
+  );
+  final knownProfit = dailySales.fold<int>(
+    0,
+    (sum, sale) => sum + sale.knownGrossProfit,
+  );
+  final itemsWithoutCost = dailySales.fold<int>(
+    0,
+    (sum, sale) => sum + sale.itemsWithoutCost,
+  );
+  final dateText =
+      '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}/${date.year}';
 
-String _csvCell(String value) => '"${value.replaceAll('"', '""')}"';
+  setTitle(summary, 1, 'LAPORAN PENJUALAN HARIAN');
+  setCell(summary, 1, 0, TextCellValue('Tanggal'));
+  setCell(summary, 1, 1, TextCellValue(dateText));
+  setCell(summary, 3, 0, TextCellValue('RINGKASAN'), style: headerStyle);
+  setCell(summary, 3, 1, TextCellValue('NILAI'), style: headerStyle);
+
+  final metrics = <(String, int)>[
+    ('Jumlah transaksi', dailySales.length),
+    ('Omzet penjualan', dailyRevenue),
+    ('Total HPP terdata', knownCosts),
+    ('Laba kotor terdata', knownProfit),
+    ('Item tanpa data HPP', itemsWithoutCost),
+  ];
+  for (var index = 0; index < metrics.length; index++) {
+    final row = index + 4;
+    final (label, value) = metrics[index];
+    setCell(summary, row, 0, TextCellValue(label), style: metricLabelStyle);
+    setCell(
+      summary,
+      row,
+      1,
+      IntCellValue(value),
+      style: index == 3
+          ? totalStyle
+          : (index == 0 || index == 4 ? countValueStyle : metricValueStyle),
+    );
+  }
+  if (itemsWithoutCost > 0) {
+    setCell(
+      summary,
+      10,
+      0,
+      TextCellValue(
+        'Catatan: laba belum lengkap karena $itemsWithoutCost item tidak memiliki data HPP saat transaksi.',
+      ),
+      style: CellStyle(
+        fontColorHex: mutedText,
+        italic: true,
+        textWrapping: TextWrapping.WrapText,
+      ),
+    );
+    summary.merge(
+      CellIndex.indexByColumnRow(columnIndex: 0, rowIndex: 10),
+      CellIndex.indexByColumnRow(columnIndex: 1, rowIndex: 10),
+    );
+    summary.setRowHeight(10, 34);
+  }
+  summary.setColumnWidth(0, 36);
+  summary.setColumnWidth(1, 24);
+
+  const headers = [
+    'Tanggal',
+    'Waktu',
+    'No. Transaksi',
+    'Produk',
+    'Qty',
+    'Harga Jual',
+    'HPP / Unit',
+    'Omzet Item',
+    'Total HPP',
+    'Laba Kotor',
+    'Tunai Diterima',
+    'Kembalian',
+  ];
+  setTitle(detail, headers.length - 1, 'RINCIAN PENJUALAN');
+  setCell(detail, 1, 0, TextCellValue('Tanggal'));
+  setCell(detail, 1, 1, TextCellValue(dateText));
+  for (var column = 0; column < headers.length; column++) {
+    setCell(
+      detail,
+      3,
+      column,
+      TextCellValue(headers[column]),
+      style: headerStyle,
+    );
+  }
+  detail.setRowHeight(3, 32);
+
+  var row = 4;
+  for (final sale in dailySales) {
+    final timeText =
+        '${sale.soldAt.hour.toString().padLeft(2, '0')}:${sale.soldAt.minute.toString().padLeft(2, '0')}:${sale.soldAt.second.toString().padLeft(2, '0')}';
+    for (var index = 0; index < sale.items.length; index++) {
+      final item = sale.items[index];
+      final data = <CellValue?>[
+        TextCellValue(dateText),
+        TextCellValue(timeText),
+        TextCellValue(sale.receiptNumber),
+        TextCellValue(item.productName),
+        IntCellValue(item.quantity),
+        IntCellValue(item.unitPrice),
+        item.unitCost == null
+            ? TextCellValue('Belum ada HPP')
+            : IntCellValue(item.unitCost!),
+        IntCellValue(item.total),
+        item.costTotal == null
+            ? TextCellValue('Belum ada HPP')
+            : IntCellValue(item.costTotal!),
+        item.grossProfit == null
+            ? TextCellValue('Belum ada HPP')
+            : IntCellValue(item.grossProfit!),
+        index == 0 ? IntCellValue(sale.cashReceived) : null,
+        index == 0 ? IntCellValue(sale.change) : null,
+      ];
+      for (var column = 0; column < data.length; column++) {
+        setCell(
+          detail,
+          row,
+          column,
+          data[column],
+          style: column >= 5
+              ? metricValueStyle
+              : CellStyle(fontColorHex: darkText),
+        );
+      }
+      row++;
+    }
+  }
+
+  if (dailySales.isEmpty) {
+    setCell(detail, row, 0, TextCellValue('Belum ada transaksi hari ini.'));
+  }
+
+  const columnWidths = <double>[14, 12, 16, 30, 8, 17, 17, 17, 17, 17, 18, 16];
+  for (var column = 0; column < columnWidths.length; column++) {
+    detail.setColumnWidth(column, columnWidths[column]);
+  }
+
+  final encoded = workbook.encode();
+  if (encoded == null || encoded.isEmpty) {
+    throw StateError('File Excel laporan tidak berhasil dibuat.');
+  }
+  return Uint8List.fromList(encoded);
+}
 
 const _productCategories = ['Sembako', 'Makanan', 'Minuman', 'Kebutuhan'];
 
@@ -1237,6 +1416,7 @@ class _CashierPageState extends State<CashierPage> {
               productName: entry.key.name,
               quantity: entry.value,
               unitPrice: entry.key.price,
+              unitCost: entry.key.hpp,
             ),
           )
           .toList(),
@@ -1291,22 +1471,21 @@ class _CashierPageState extends State<CashierPage> {
             .toList()
           ..sort((a, b) => a.soldAt.compareTo(b.soldAt));
     final date = _dateStamp(now);
-    final csv = generateDailySalesCsv(dailySales, now);
     try {
-      final bytes = Uint8List.fromList(utf8.encode('\uFEFF$csv'));
+      final bytes = generateDailySalesXlsx(dailySales, now);
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
         await FileSaver.instance.saveAs(
           name: 'laporan_penjualan_$date',
           bytes: bytes,
-          fileExtension: 'csv',
-          mimeType: MimeType.csv,
+          fileExtension: 'xlsx',
+          mimeType: MimeType.microsoftExcel,
         );
       } else {
         await FileSaver.instance.saveToDownloads(
           name: 'laporan_penjualan_$date',
           bytes: bytes,
-          fileExtension: 'csv',
-          mimeType: MimeType.csv,
+          fileExtension: 'xlsx',
+          mimeType: MimeType.microsoftExcel,
         );
       }
       if (!mounted) return;
@@ -1316,7 +1495,7 @@ class _CashierPageState extends State<CashierPage> {
           SnackBar(
             behavior: SnackBarBehavior.floating,
             content: Text(
-              'Laporan ${dailySales.length} transaksi tersimpan di folder Unduhan.',
+              'Laporan Excel ${dailySales.length} transaksi tersimpan di folder Unduhan.',
             ),
           ),
         );
