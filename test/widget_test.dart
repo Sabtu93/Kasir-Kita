@@ -15,6 +15,7 @@ void main() {
 
     await _registerAccount(tester);
     expect(find.text('Toko Saya'), findsOneWidget);
+    expect(find.byKey(const ValueKey('header-clock')), findsOneWidget);
     expect(find.text('Daftar Produk'), findsOneWidget);
     expect(find.byTooltip('Unduh laporan penjualan'), findsOneWidget);
     await tester.tap(find.byTooltip('Unduh laporan penjualan'));
@@ -44,7 +45,11 @@ void main() {
 
     await tester.tap(find.text('Bayar Sekarang'));
     await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField).last, '100000');
+    await tester.enterText(find.byKey(const ValueKey('customer-name')), 'Siti');
+    await tester.enterText(
+      find.byKey(const ValueKey('cash-received')),
+      '100000',
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.text('Selesaikan'));
     await tester.pumpAndSettle();
@@ -53,6 +58,9 @@ void main() {
       find.text('Transaksi #0001 berhasil. Kembalian Rp27.500'),
       findsOneWidget,
     );
+    final preferences = await SharedPreferences.getInstance();
+    expect(preferences.getString('kasir_kita_sales_v1_kasir01'), isNotNull);
+    expect(preferences.getString('kasir_kita_sales_v1'), isNull);
   });
 
   testWidgets('new products and accounts are saved on this device', (
@@ -107,13 +115,73 @@ void main() {
     expect(find.text('Teh Botol'), findsNWidgets(2));
     expect(find.text('HPP Rp3.000'), findsOneWidget);
   });
+
+  testWidgets('products are isolated between accounts', (tester) async {
+    await tester.pumpWidget(const MinimarketApp());
+    await tester.pumpAndSettle();
+
+    await _registerAccount(tester);
+    await _addCustomProduct(tester, 'Produk Akun Satu');
+    await _closeStore(tester);
+
+    await _registerAccount(tester, accountId: 'kasir02', shopName: 'Toko Dua');
+    await tester.enterText(find.byType(TextField).first, 'Produk Akun Satu');
+    await tester.pumpAndSettle();
+    expect(find.text('Produk Akun Satu'), findsOneWidget);
+
+    await _addCustomProduct(tester, 'Produk Akun Dua');
+    await _closeStore(tester);
+
+    await _loginAccount(tester, 'kasir01');
+    await _startStore(tester);
+    await tester.enterText(find.byType(TextField).first, 'Produk Akun Satu');
+    await tester.pumpAndSettle();
+    expect(find.text('Produk Akun Satu'), findsNWidgets(2));
+    await tester.enterText(find.byType(TextField).first, 'Produk Akun Dua');
+    await tester.pumpAndSettle();
+    expect(find.text('Produk Akun Dua'), findsOneWidget);
+    await _closeStore(tester);
+
+    await _loginAccount(tester, 'kasir02');
+    await _startStore(tester);
+    await tester.enterText(find.byType(TextField).first, 'Produk Akun Dua');
+    await tester.pumpAndSettle();
+    expect(find.text('Produk Akun Dua'), findsNWidgets(2));
+    await tester.enterText(find.byType(TextField).first, 'Produk Akun Satu');
+    await tester.pumpAndSettle();
+    expect(find.text('Produk Akun Satu'), findsOneWidget);
+  });
+
+  testWidgets('legacy products move to the first account', (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'kasir_kita_products_v1': '[{"name":"Produk Lama","category":"Khusus","hpp":3000,"imageData":null,"price":5000,"stock":4}]',
+    });
+    await tester.pumpWidget(const MinimarketApp());
+    await tester.pumpAndSettle();
+
+    await _registerAccount(tester);
+    await tester.enterText(find.byType(TextField).first, 'Produk Lama');
+    await tester.pumpAndSettle();
+    expect(find.text('Produk Lama'), findsNWidgets(2));
+
+    final preferences = await SharedPreferences.getInstance();
+    expect(
+      preferences.getString('kasir_kita_products_v1_kasir01'),
+      contains('Produk Lama'),
+    );
+    expect(preferences.getString('kasir_kita_products_v1'), isNull);
+  });
 }
 
-Future<void> _registerAccount(WidgetTester tester) async {
+Future<void> _registerAccount(
+  WidgetTester tester, {
+  String accountId = 'kasir01',
+  String shopName = 'Toko Saya',
+}) async {
   await tester.tap(find.text('Belum punya akun? Daftar akun'));
   await tester.pumpAndSettle();
-  await tester.enterText(find.byKey(const ValueKey('shop-name')), 'Toko Saya');
-  await tester.enterText(find.byKey(const ValueKey('account-id')), 'kasir01');
+  await tester.enterText(find.byKey(const ValueKey('shop-name')), shopName);
+  await tester.enterText(find.byKey(const ValueKey('account-id')), accountId);
   await tester.enterText(
     find.byKey(const ValueKey('account-password')),
     'rahasia123',
@@ -129,7 +197,43 @@ Future<void> _registerAccount(WidgetTester tester) async {
   await tester.pump(const Duration(seconds: 2));
   await tester.pumpAndSettle();
   await _startStore(tester);
-  expect(find.text('Toko Saya'), findsOneWidget);
+  expect(find.text(shopName), findsOneWidget);
+}
+
+Future<void> _loginAccount(WidgetTester tester, String accountId) async {
+  await tester.tap(find.text(accountId));
+  await tester.enterText(
+    find.byKey(const ValueKey('account-password')),
+    'rahasia123',
+  );
+  await tester.tap(find.text('Masuk'));
+  await tester.pump();
+  await tester.pump(const Duration(seconds: 2));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _addCustomProduct(WidgetTester tester, String name) async {
+  await tester.tap(find.text('Tambah'));
+  await tester.pumpAndSettle();
+  await tester.enterText(find.byKey(const ValueKey('product-name')), name);
+  await tester.enterText(
+    find.byKey(const ValueKey('product-category')),
+    'Khusus Akun',
+  );
+  await tester.enterText(find.byKey(const ValueKey('product-hpp')), '3000');
+  await tester.enterText(find.byKey(const ValueKey('product-price')), '5000');
+  await tester.enterText(find.byKey(const ValueKey('product-stock')), '12');
+  await tester.tap(find.text('Simpan produk'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _closeStore(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Tutup toko'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Tutup toko').last);
+  await tester.pumpAndSettle();
+  await tester.pump(const Duration(seconds: 5));
+  await tester.pumpAndSettle();
 }
 
 Future<void> _startStore(WidgetTester tester) async {

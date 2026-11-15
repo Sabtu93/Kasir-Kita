@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -79,8 +80,6 @@ class _MinimarketAppState extends State<MinimarketApp> {
     try {
       final preferences = await SharedPreferences.getInstance();
       final storedAccounts = preferences.getString(_accountsKey);
-      final storedProducts = preferences.getString(_productsKey);
-      final storedSales = preferences.getString(_salesKey);
       final accounts = storedAccounts == null
           ? <_LocalAccount>[]
           : (jsonDecode(storedAccounts) as List<dynamic>)
@@ -90,29 +89,12 @@ class _MinimarketAppState extends State<MinimarketApp> {
                   ),
                 )
                 .toList();
-      final products = storedProducts == null
-          ? List<Product>.of(_products)
-          : (jsonDecode(storedProducts) as List<dynamic>)
-                .map(
-                  (entry) =>
-                      Product.fromMap(Map<String, dynamic>.from(entry as Map)),
-                )
-                .toList();
-      final sales = storedSales == null
-          ? <SaleRecord>[]
-          : (jsonDecode(storedSales) as List<dynamic>)
-                .map(
-                  (entry) => SaleRecord.fromMap(
-                    Map<String, dynamic>.from(entry as Map),
-                  ),
-                )
-                .toList();
       if (!mounted) return;
       setState(() {
         _preferences = preferences;
         _accounts = accounts;
-        _catalog = products;
-        _sales = sales;
+        _catalog = List.of(_products);
+        _sales = [];
         _loading = false;
       });
     } catch (error) {
@@ -139,7 +121,19 @@ class _MinimarketAppState extends State<MinimarketApp> {
     if (!_constantTimeEquals(passwordHash, matchedAccount.passwordHash)) {
       return 'ID atau kata sandi salah.';
     }
-    if (mounted) setState(() => _activeUser = matchedAccount.id);
+    final accountData = await _loadAccountData(
+      matchedAccount.id,
+      isFirstAccount:
+          _accounts.isNotEmpty &&
+          _accounts.first.id.toLowerCase() == matchedAccount.id.toLowerCase(),
+    );
+    if (mounted) {
+      setState(() {
+        _activeUser = matchedAccount.id;
+        _catalog = accountData.products;
+        _sales = accountData.sales;
+      });
+    }
     return null;
   }
 
@@ -169,19 +163,106 @@ class _MinimarketAppState extends State<MinimarketApp> {
       jsonEncode(updatedAccounts.map((entry) => entry.toMap()).toList()),
     );
     if (!saved) throw StateError('Akun tidak berhasil disimpan di perangkat.');
+    final accountData = await _loadAccountData(
+      account.id,
+      isFirstAccount:
+          updatedAccounts.first.id.toLowerCase() == account.id.toLowerCase(),
+    );
     if (mounted) {
       setState(() {
         _accounts = updatedAccounts;
         _activeUser = account.id;
+        _catalog = accountData.products;
+        _sales = accountData.sales;
       });
     }
     return null;
   }
 
+  Future<_AccountData> _loadAccountData(
+    String userId, {
+    required bool isFirstAccount,
+  }) async {
+    final preferences = _preferences;
+    if (preferences == null) {
+      throw StateError('Penyimpanan akun belum siap.');
+    }
+
+    final productsKey = _accountStorageKey(_productsKey, userId);
+    final salesKey = _accountStorageKey(_salesKey, userId);
+    var storedProducts = preferences.getString(productsKey);
+    var storedSales = preferences.getString(salesKey);
+    String? legacyProducts;
+    String? legacySales;
+    var migrateProducts = false;
+    var migrateSales = false;
+    if (isFirstAccount) {
+      legacyProducts = preferences.getString(_productsKey);
+      legacySales = preferences.getString(_salesKey);
+      if (storedProducts == null && legacyProducts != null) {
+        storedProducts = legacyProducts;
+        migrateProducts = true;
+      }
+      if (storedSales == null && legacySales != null) {
+        storedSales = legacySales;
+        migrateSales = true;
+      }
+    }
+
+    final products = storedProducts == null
+        ? List<Product>.of(_products)
+        : (jsonDecode(storedProducts) as List<dynamic>)
+              .map(
+                (entry) =>
+                    Product.fromMap(Map<String, dynamic>.from(entry as Map)),
+              )
+              .toList();
+    final sales = storedSales == null
+        ? <SaleRecord>[]
+        : (jsonDecode(storedSales) as List<dynamic>)
+              .map(
+                (entry) =>
+                    SaleRecord.fromMap(Map<String, dynamic>.from(entry as Map)),
+              )
+              .toList();
+    if (migrateProducts) {
+      final saved = await preferences.setString(productsKey, storedProducts!);
+      if (!saved) {
+        throw StateError('Produk lama tidak berhasil dipindahkan ke akun.');
+      }
+    }
+    if (migrateSales) {
+      final saved = await preferences.setString(salesKey, storedSales!);
+      if (!saved) {
+        throw StateError('Transaksi lama tidak berhasil dipindahkan ke akun.');
+      }
+    }
+    if (legacyProducts != null && !await preferences.remove(_productsKey)) {
+      throw StateError('Data produk lama tidak berhasil dibersihkan.');
+    }
+    if (legacySales != null && !await preferences.remove(_salesKey)) {
+      throw StateError('Data transaksi lama tidak berhasil dibersihkan.');
+    }
+    return _AccountData(products: products, sales: sales);
+  }
+
+  String _accountStorageKey(String baseKey, String userId) =>
+      '${baseKey}_${Uri.encodeComponent(userId.trim().toLowerCase())}';
+
+  void _logout() {
+    setState(() {
+      _activeUser = null;
+      _catalog = List.of(_products);
+      _sales = [];
+    });
+  }
+
   Future<void> _addProduct(Product product) async {
     final updatedCatalog = [..._catalog, product];
+    final userId = _activeUser;
+    if (userId == null) throw StateError('Tidak ada akun yang sedang aktif.');
     final saved = await _preferences!.setString(
-      _productsKey,
+      _accountStorageKey(_productsKey, userId),
       jsonEncode(updatedCatalog.map((entry) => entry.toMap()).toList()),
     );
     if (!saved) {
@@ -192,8 +273,10 @@ class _MinimarketAppState extends State<MinimarketApp> {
 
   Future<void> _addSale(SaleRecord sale) async {
     final updatedSales = [..._sales, sale];
+    final userId = _activeUser;
+    if (userId == null) throw StateError('Tidak ada akun yang sedang aktif.');
     final saved = await _preferences!.setString(
-      _salesKey,
+      _accountStorageKey(_salesKey, userId),
       jsonEncode(updatedSales.map((entry) => entry.toMap()).toList()),
     );
     if (!saved) throw StateError('Transaksi tidak berhasil disimpan.');
@@ -233,10 +316,17 @@ class _MinimarketAppState extends State<MinimarketApp> {
               sales: _sales,
               onAddProduct: _addProduct,
               onCompleteSale: _addSale,
-              onLogout: () => setState(() => _activeUser = null),
+              onLogout: _logout,
             ),
     );
   }
+}
+
+class _AccountData {
+  const _AccountData({required this.products, required this.sales});
+
+  final List<Product> products;
+  final List<SaleRecord> sales;
 }
 
 class Product {
@@ -323,9 +413,11 @@ class SaleRecord {
     required this.items,
     required this.total,
     required this.cashReceived,
+    this.customerName = '',
   });
 
   final String receiptNumber;
+  final String customerName;
   final DateTime soldAt;
   final List<SaleLine> items;
   final int total;
@@ -341,6 +433,7 @@ class SaleRecord {
 
   Map<String, Object?> toMap() => {
     'receiptNumber': receiptNumber,
+    'customerName': customerName,
     'soldAt': soldAt.toIso8601String(),
     'items': items.map((item) => item.toMap()).toList(),
     'total': total,
@@ -349,6 +442,7 @@ class SaleRecord {
 
   factory SaleRecord.fromMap(Map<String, dynamic> map) => SaleRecord(
     receiptNumber: map['receiptNumber'] as String,
+    customerName: map['customerName'] as String? ?? '',
     soldAt: DateTime.parse(map['soldAt'] as String),
     items: (map['items'] as List<dynamic>)
         .map((item) => SaleLine.fromMap(Map<String, dynamic>.from(item as Map)))
@@ -397,8 +491,7 @@ Uint8List _generateSalesXlsx(
   final periodSales =
       sales
           .where(
-            (sale) =>
-                !sale.soldAt.isBefore(start) && sale.soldAt.isBefore(end),
+            (sale) => !sale.soldAt.isBefore(start) && sale.soldAt.isBefore(end),
           )
           .toList()
         ..sort((a, b) => a.soldAt.compareTo(b.soldAt));
@@ -543,6 +636,7 @@ Uint8List _generateSalesXlsx(
     'Tanggal',
     'Waktu',
     'No. Transaksi',
+    'Nama Customer',
     'Produk',
     'Qty',
     'Harga Jual',
@@ -578,6 +672,7 @@ Uint8List _generateSalesXlsx(
         TextCellValue(saleDateText),
         TextCellValue(timeText),
         TextCellValue(sale.receiptNumber),
+        TextCellValue(sale.customerName),
         TextCellValue(item.productName),
         IntCellValue(item.quantity),
         IntCellValue(item.unitPrice),
@@ -600,7 +695,7 @@ Uint8List _generateSalesXlsx(
           row,
           column,
           data[column],
-          style: column >= 5
+          style: column >= 6
               ? metricValueStyle
               : CellStyle(fontColorHex: darkText),
         );
@@ -610,10 +705,29 @@ Uint8List _generateSalesXlsx(
   }
 
   if (periodSales.isEmpty) {
-    setCell(detail, row, 0, TextCellValue('Belum ada transaksi pada periode ini.'));
+    setCell(
+      detail,
+      row,
+      0,
+      TextCellValue('Belum ada transaksi pada periode ini.'),
+    );
   }
 
-  const columnWidths = <double>[14, 12, 16, 30, 8, 17, 17, 17, 17, 17, 18, 16];
+  const columnWidths = <double>[
+    14,
+    12,
+    16,
+    24,
+    30,
+    8,
+    17,
+    17,
+    17,
+    17,
+    17,
+    18,
+    16,
+  ];
   for (var column = 0; column < columnWidths.length; column++) {
     detail.setColumnWidth(column, columnWidths[column]);
   }
@@ -946,9 +1060,7 @@ class _LoginPageState extends State<LoginPage> {
               _idController.text.trim(),
               _passwordController.text,
               _shopNameController.text.trim(),
-              _shopLogoBytes == null
-                  ? null
-                  : base64Encode(_shopLogoBytes!),
+              _shopLogoBytes == null ? null : base64Encode(_shopLogoBytes!),
             )
           : await widget.onLogin(
               _idController.text.trim(),
@@ -985,7 +1097,8 @@ class _LoginPageState extends State<LoginPage> {
         });
       }
     } catch (error) {
-      if (mounted) setState(() => _error = 'Logo toko tidak dapat dipilih: $error');
+      if (mounted)
+        setState(() => _error = 'Logo toko tidak dapat dipilih: $error');
     }
   }
 
@@ -1134,14 +1247,13 @@ class _LoginPageState extends State<LoginPage> {
                                         value == null || value.trim().isEmpty
                                         ? 'Nama toko wajib diisi.'
                                         : null,
-                                    decoration: _authDecoration(
-                                      'Nama toko',
-                                    ).copyWith(
-                                      prefixIcon: const Icon(
-                                        Icons.storefront_outlined,
-                                        size: 20,
-                                      ),
-                                    ),
+                                    decoration: _authDecoration('Nama toko')
+                                        .copyWith(
+                                          prefixIcon: const Icon(
+                                            Icons.storefront_outlined,
+                                            size: 20,
+                                          ),
+                                        ),
                                   ),
                                   const SizedBox(height: 14),
                                   Row(
@@ -1161,7 +1273,8 @@ class _LoginPageState extends State<LoginPage> {
                                         clipBehavior: Clip.antiAlias,
                                         child: _shopLogoBytes == null
                                             ? const Icon(
-                                                Icons.add_photo_alternate_outlined,
+                                                Icons
+                                                    .add_photo_alternate_outlined,
                                                 color: _muted,
                                               )
                                             : Image.memory(
@@ -1529,6 +1642,8 @@ class _CashierPageState extends State<CashierPage> {
   int _openingCash = 0;
   int _revenue = 0;
   int _completedTransactions = 0;
+  DateTime _currentTime = DateTime.now();
+  Timer? _clockTimer;
 
   List<String> get _categories => [
     'Semua',
@@ -1556,6 +1671,7 @@ class _CashierPageState extends State<CashierPage> {
 
   @override
   void dispose() {
+    _clockTimer?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -1564,6 +1680,9 @@ class _CashierPageState extends State<CashierPage> {
   void initState() {
     super.initState();
     _transactionNumber = widget.sales.length + 1;
+    _clockTimer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (mounted) setState(() => _currentTime = DateTime.now());
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) => _openStore());
   }
 
@@ -1647,7 +1766,7 @@ class _CashierPageState extends State<CashierPage> {
   Future<void> _checkout() async {
     if (!_storeOpen || _cart.isEmpty) return;
     final total = _subtotal;
-    final paid = await showDialog<int>(
+    final payment = await showDialog<PaymentDetails>(
       context: context,
       builder: (context) => PaymentDialog(
         total: total,
@@ -1655,10 +1774,11 @@ class _CashierPageState extends State<CashierPage> {
         formatRupiah: _rupiah,
       ),
     );
-    if (!mounted || paid == null) return;
+    if (!mounted || payment == null) return;
     final receiptNumber = _transactionNumber;
     final sale = SaleRecord(
       receiptNumber: receiptNumber.toString().padLeft(4, '0'),
+      customerName: payment.customerName,
       soldAt: DateTime.now(),
       items: _cart.entries
           .map(
@@ -1671,7 +1791,7 @@ class _CashierPageState extends State<CashierPage> {
           )
           .toList(),
       total: total,
-      cashReceived: paid,
+      cashReceived: payment.cashReceived,
     );
     try {
       await widget.onCompleteSale(sale);
@@ -1702,7 +1822,7 @@ class _CashierPageState extends State<CashierPage> {
           behavior: SnackBarBehavior.floating,
           backgroundColor: _dark,
           content: Text(
-            'Transaksi #${receiptNumber.toString().padLeft(4, '0')} berhasil. Kembalian ${_rupiah(paid - total)}',
+            'Transaksi #${receiptNumber.toString().padLeft(4, '0')} berhasil. Kembalian ${_rupiah(payment.cashReceived - total)}',
           ),
         ),
       );
@@ -1871,8 +1991,97 @@ class _CashierPageState extends State<CashierPage> {
   Widget _buildHeader(bool wide) {
     final now = DateTime.now();
     final logoBytes = _decodeImage(widget.shopLogo);
+    final time =
+        '${_currentTime.hour.toString().padLeft(2, '0')}:${_currentTime.minute.toString().padLeft(2, '0')}';
     final date =
         '${now.day.toString().padLeft(2, '0')} ${_monthName(now.month)} ${now.year}';
+    final Widget dateAndClock;
+    if (wide) {
+      dateAndClock = Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+        decoration: BoxDecoration(
+          color: _canvas,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            const Icon(Icons.calendar_today_rounded, size: 15, color: _muted),
+            const SizedBox(width: 8),
+            Text(
+              date,
+              style: const TextStyle(
+                color: _dark,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Container(width: 1, height: 16, color: const Color(0xFFDCE4DE)),
+            const SizedBox(width: 10),
+            const Icon(Icons.access_time_rounded, size: 15, color: _green),
+            const SizedBox(width: 5),
+            Text(
+              time,
+              key: const ValueKey('header-clock'),
+              style: const TextStyle(
+                color: _dark,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      );
+    } else {
+      dateAndClock = Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            widget.userId,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: _green,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.access_time_rounded, size: 12, color: _muted),
+              const SizedBox(width: 3),
+              Text(
+                time,
+                key: const ValueKey('header-clock'),
+                style: const TextStyle(
+                  color: _dark,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    }
+
+    final Widget closeStoreButton;
+    if (wide) {
+      closeStoreButton = TextButton.icon(
+        onPressed: _closeStore,
+        icon: const Icon(Icons.store_rounded, size: 18),
+        label: const Text('Tutup toko'),
+        style: TextButton.styleFrom(foregroundColor: _green),
+      );
+    } else {
+      closeStoreButton = IconButton(
+        tooltip: 'Tutup toko',
+        onPressed: _closeStore,
+        icon: const Icon(Icons.store_rounded, color: _green, size: 20),
+      );
+    }
+
     return Container(
       padding: EdgeInsets.fromLTRB(wide ? 30 : 20, 18, wide ? 30 : 20, 16),
       decoration: const BoxDecoration(
@@ -1925,42 +2134,7 @@ class _CashierPageState extends State<CashierPage> {
             ],
           ),
           const Spacer(),
-          if (wide)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-              decoration: BoxDecoration(
-                color: _canvas,
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                children: [
-                  const Icon(
-                    Icons.calendar_today_rounded,
-                    size: 15,
-                    color: _muted,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    date,
-                    style: const TextStyle(
-                      color: _dark,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            )
-          else
-            Text(
-              widget.userId,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                color: _green,
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
+          dateAndClock,
           PopupMenuButton<String>(
             tooltip: 'Unduh laporan penjualan',
             onSelected: (report) {
@@ -1994,19 +2168,7 @@ class _CashierPageState extends State<CashierPage> {
               ),
             ),
           ),
-          if (wide)
-            TextButton.icon(
-              onPressed: _closeStore,
-              icon: const Icon(Icons.store_rounded, size: 18),
-              label: const Text('Tutup toko'),
-              style: TextButton.styleFrom(foregroundColor: _green),
-            )
-          else
-            IconButton(
-              tooltip: 'Tutup toko',
-              onPressed: _closeStore,
-              icon: const Icon(Icons.store_rounded, color: _green, size: 20),
-            ),
+          closeStoreButton,
         ],
       ),
     );
@@ -2742,10 +2904,7 @@ class _CartItem extends StatelessWidget {
               borderRadius: BorderRadius.circular(11),
             ),
             clipBehavior: Clip.antiAlias,
-            child: _productImage(
-              product,
-              iconSize: 23,
-            ),
+            child: _productImage(product, iconSize: 23),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -2890,7 +3049,8 @@ class _AddProductDialogState extends State<AddProductDialog> {
         });
       }
     } catch (error) {
-      if (mounted) setState(() => _imageError = 'Foto tidak dapat dipilih: $error');
+      if (mounted)
+        setState(() => _imageError = 'Foto tidak dapat dipilih: $error');
     }
   }
 
@@ -2989,9 +3149,8 @@ class _AddProductDialogState extends State<AddProductDialog> {
                             right: 6,
                             child: IconButton.filled(
                               tooltip: 'Hapus foto produk',
-                              onPressed: () => setState(
-                                () => _imageBytes = null,
-                              ),
+                              onPressed: () =>
+                                  setState(() => _imageBytes = null),
                               icon: const Icon(Icons.delete_outline_rounded),
                             ),
                           ),
@@ -3255,6 +3414,16 @@ class _StoreClosingDialog extends StatelessWidget {
   }
 }
 
+class PaymentDetails {
+  const PaymentDetails({
+    required this.customerName,
+    required this.cashReceived,
+  });
+
+  final String customerName;
+  final int cashReceived;
+}
+
 class PaymentDialog extends StatefulWidget {
   const PaymentDialog({
     required this.total,
@@ -3272,13 +3441,16 @@ class PaymentDialog extends StatefulWidget {
 }
 
 class _PaymentDialogState extends State<PaymentDialog> {
+  final _customerNameController = TextEditingController();
   final _cashController = TextEditingController();
   int? _cash;
 
   int get _change => (_cash ?? 0) - widget.total;
+  String get _customerName => _customerNameController.text.trim();
 
   @override
   void dispose() {
+    _customerNameController.dispose();
     _cashController.dispose();
     super.dispose();
   }
@@ -3299,6 +3471,7 @@ class _PaymentDialogState extends State<PaymentDialog> {
     }.toList()..sort();
     return AlertDialog(
       backgroundColor: Colors.white,
+      scrollable: true,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
       titlePadding: const EdgeInsets.fromLTRB(24, 23, 24, 5),
       contentPadding: const EdgeInsets.fromLTRB(24, 12, 24, 8),
@@ -3350,6 +3523,41 @@ class _PaymentDialogState extends State<PaymentDialog> {
             ),
             const SizedBox(height: 17),
             const Text(
+              'Nama customer',
+              style: TextStyle(
+                color: _dark,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 7),
+            TextField(
+              key: const ValueKey('customer-name'),
+              controller: _customerNameController,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                hintText: 'Masukkan nama customer',
+                helperText: 'Wajib diisi sebelum transaksi diselesaikan.',
+                filled: true,
+                fillColor: _canvas,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFFE8ECE8)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: Color(0xFFE8ECE8)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: const BorderSide(color: _green, width: 1.5),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text(
               'Uang diterima',
               style: TextStyle(
                 color: _dark,
@@ -3359,8 +3567,8 @@ class _PaymentDialogState extends State<PaymentDialog> {
             ),
             const SizedBox(height: 7),
             TextField(
+              key: const ValueKey('cash-received'),
               controller: _cashController,
-              autofocus: true,
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               onChanged: (value) => setState(() => _cash = int.tryParse(value)),
@@ -3446,10 +3654,17 @@ class _PaymentDialogState extends State<PaymentDialog> {
         ),
         FilledButton(
           onPressed:
-              _cash != null &&
+              _customerName.isNotEmpty &&
+                  _cash != null &&
                   _cash! >= widget.total &&
                   _change <= widget.availableCash
-              ? () => Navigator.pop(context, _cash)
+              ? () => Navigator.pop(
+                  context,
+                  PaymentDetails(
+                    customerName: _customerName,
+                    cashReceived: _cash!,
+                  ),
+                )
               : null,
           style: FilledButton.styleFrom(
             backgroundColor: _green,
